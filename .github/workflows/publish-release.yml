@@ -1,0 +1,150 @@
+name: "Publish design system release"
+
+on:
+  push:
+    branches:
+      - release
+  workflow_dispatch:
+    inputs:
+      pr_numbers:
+        description: "Comma-separated list of PR numbers to include"
+        required: true
+        type: string
+
+concurrency:
+  group: tag-release
+  cancel-in-progress: false
+
+jobs:
+  publish-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get latest version tag
+        id: get_latest_tag
+        run: |
+          tag=$(git tag --sort=-creatordate | grep -E '^\d+\.\d+\.\d+$' | tail -n 1)
+          echo "latest=$tag" >> $GITHUB_OUTPUT
+
+      - name: Get commits since last tag (push only)
+        id: commit_prs
+        if: github.event_name == 'push'
+        run: |
+          latest="${{ steps.get_latest_tag.outputs.latest }}"
+          range="${latest}..HEAD"
+          prs=$(git log --pretty=format:"%s" $range | grep -oE '\(#([0-9]+)\)' | grep -oE '[0-9]+' | sort -u | tr '\n' ',' | sed 's/,$//')
+          echo "prs=$prs" >> $GITHUB_OUTPUT
+
+      - name: Use PRs from manual input (manual only)
+        id: manual_prs
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          prs="${{ github.event.inputs.pr_numbers }}"
+          echo "prs=$prs" >> $GITHUB_OUTPUT
+
+      - name: Determine release bump type
+        id: bump_type
+        uses: actions/github-script@v7
+        env:
+          COMMIT_PRS: ${{ steps.commit_prs.outputs.prs }}
+          MANUAL_PRS: ${{ steps.manual_prs.outputs.prs }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const event = context.eventName;
+            const input = event === 'push' ? process.env.COMMIT_PRS : process.env.MANUAL_PRS;
+            const prNumbers = input.split(',').filter(Boolean);
+            const priorities = { 'release: major': 3, 'release: minor': 2, 'release: patch': 1 };
+            let maxPriority = 0;
+
+            for (const prNumber of prNumbers) {
+              const { data: pr } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: Number(prNumber)
+              });
+              for (const label of pr.labels) {
+                const p = priorities[label.name];
+                if (p && p > maxPriority) maxPriority = p;
+              }
+            }
+
+            const bumpMap = { 3: 'major', 2: 'minor', 1: 'patch' };
+            const bump = bumpMap[maxPriority] || null;
+
+            if (!bump) {
+              core.setFailed('❌ No release label found on any of the PRs.');
+            } else {
+              core.setOutput('type', bump);
+              core.setOutput('prs', prNumbers.join(','));
+              console.log(`📦 Release bump type: ${bump}`);
+            }
+
+      - name: Bump version
+        id: bump
+        run: |
+          IFS='.' read -r major minor patch <<< "${{ steps.get_latest_tag.outputs.latest || '0.0.0' }}"
+          bump="${{ steps.bump_type.outputs.type }}"
+
+          if [[ "$bump" == "major" ]]; then
+            major=$((major + 1)); minor=0; patch=0
+          elif [[ "$bump" == "minor" ]]; then
+            minor=$((minor + 1)); patch=0
+          else
+            patch=$((patch + 1))
+          fi
+
+          new_version="$major.$minor.$patch"
+          echo "version=$new_version" >> $GITHUB_OUTPUT
+          echo "🔢 New version: $new_version"
+
+      - name: Create and push tag
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git tag ${{ steps.bump.outputs.version }}
+          git push origin ${{ steps.bump.outputs.version }}
+
+      - name: Generate changelog
+        id: changelog
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const prNumbers = '${{ steps.bump_type.outputs.prs }}'.split(',').filter(Boolean);
+            const changes = [];
+
+            for (const prNumber of prNumbers) {
+              const { data: pr } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: Number(prNumber)
+              });
+              changes.push(`- ${pr.title} ([#${pr.number}](${pr.html_url})) by @${pr.user.login}`);
+            }
+
+            const changelog = changes.length ? changes.join('\n') : 'No merged PRs found.';
+            core.setOutput("log", changelog);
+
+      - name: Create GitHub Release
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: '${{ steps.bump.outputs.version }}',
+              name: 'Release ${{ steps.bump.outputs.version }}',
+              body: `### 📦 Changes\n\n${{ steps.changelog.outputs.log }}`,
+              draft: false,
+              prerelease: false
+            });
