@@ -31,49 +31,27 @@ jobs:
       - name: Get latest version tag
         id: get_latest_tag
         run: |
-          tag=$(git tag --sort=-creatordate | grep -E '^\d+\.\d+\.\d+$' | tail -n 1)
-          echo "latest=$tag" >> $GITHUB_OUTPUT
+          latest=$(git tag | grep -E '^\d+\.\d+\.\d+$' | sort -V | tail -n 1)
+          echo "Latest version tag: $latest"
+          echo "latest=$latest" >> $GITHUB_OUTPUT
 
-      - name: Get PR numbers since last tag (push only)
+      - name: Get commits since last tag (push only)
         id: commit_prs
         if: github.event_name == 'push'
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const latest = '${{ steps.get_latest_tag.outputs.latest }}';
-            const commits = await github.rest.repos.listCommits({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              sha: context.sha,
-              per_page: 100
-            });
-
-            const prNumbers = new Set();
-
-            for (const commit of commits.data) {
-              const { data: prs } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                commit_sha: commit.sha
-              });
-
-              prs.forEach(pr => {
-                if (pr.merged_at) {
-                  prNumbers.add(pr.number);
-                }
-              });
-            }
-
-            const output = Array.from(prNumbers).join(',');
-            core.setOutput('prs', output);
-            console.log(`🔍 PRs found: ${output}`);
+        run: |
+          latest="${{ steps.get_latest_tag.outputs.latest }}"
+          echo "Using range: ${latest}..HEAD"
+          range="${latest}..HEAD"
+          prs=$(git log --pretty=format:"%s" $range | grep -oE '\(#([0-9]+)\)' | grep -oE '[0-9]+' | sort -u | tr '\n' ',' | sed 's/,$//')
+          echo "Found PR numbers: $prs"
+          echo "prs=$prs" >> $GITHUB_OUTPUT
 
       - name: Use PRs from manual input (manual only)
         id: manual_prs
         if: github.event_name == 'workflow_dispatch'
         run: |
           prs="${{ github.event.inputs.pr_numbers }}"
+          echo "Manual PRs provided: $prs"
           echo "prs=$prs" >> $GITHUB_OUTPUT
 
       - name: Determine release bump type
@@ -87,7 +65,7 @@ jobs:
           script: |
             const event = context.eventName;
             const input = event === 'push' ? process.env.COMMIT_PRS : process.env.MANUAL_PRS;
-            const prNumbers = (input || '').split(',').filter(Boolean);
+            const prNumbers = input.split(',').filter(Boolean);
             const priorities = { 'release: major': 3, 'release: minor': 2, 'release: patch': 1 };
             let maxPriority = 0;
 
@@ -117,7 +95,9 @@ jobs:
       - name: Bump version
         id: bump
         run: |
-          IFS='.' read -r major minor patch <<< "${{ steps.get_latest_tag.outputs.latest || '0.0.0' }}"
+          latest="${{ steps.get_latest_tag.outputs.latest }}"
+          echo "Latest tag: $latest"
+          IFS='.' read -r major minor patch <<< "${latest:-0.0.0}"
           bump="${{ steps.bump_type.outputs.type }}"
 
           if [[ "$bump" == "major" ]]; then
@@ -129,15 +109,22 @@ jobs:
           fi
 
           new_version="$major.$minor.$patch"
+          echo "🔢 New version calculated: $new_version"
           echo "version=$new_version" >> $GITHUB_OUTPUT
-          echo "🔢 New version: $new_version"
 
       - name: Create and push tag
         run: |
+          new_tag="${{ steps.bump.outputs.version }}"
+          echo "Tagging commit with: $new_tag"
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-          git tag ${{ steps.bump.outputs.version }}
-          git push origin ${{ steps.bump.outputs.version }}
+
+          if git rev-parse "$new_tag" >/dev/null 2>&1; then
+            echo "⚠️ Tag $new_tag already exists. Skipping tagging."
+          else
+            git tag "$new_tag"
+            git push origin "$new_tag"
+          fi
 
       - name: Generate changelog
         id: changelog
@@ -159,6 +146,7 @@ jobs:
 
             const changelog = changes.length ? changes.join('\n') : 'No merged PRs found.';
             core.setOutput("log", changelog);
+            console.log("📝 Changelog:\n" + changelog);
 
       - name: Create GitHub Release
         uses: actions/github-script@v7
