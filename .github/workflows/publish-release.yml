@@ -28,21 +28,61 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Get latest version tag (Original step)
+      - name: Get latest version tag
         id: get_latest_tag
         run: |
-          latest=$(git describe --tags --abbrev=0)
-          echo "Latest version tag: '$latest'" # Add quotes around $latest here too for clarity
+          # The '2>/dev/null' suppresses errors, and '|| echo ""' provides a fallback.
+          # This ensures the step succeeds even if no tags exist.
+          latest=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          
+          if [[ -n "$latest" ]]; then
+            echo "Found latest tag: $latest"
+          else
+            echo "No tags found. The next step will use the first commit."
+          fi
+          
           echo "latest=$latest" >> $GITHUB_OUTPUT
 
-      - name: Get commits since last tag (push only)
+      - name: Get PRs since last tag (push only)
         id: commit_prs
         if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          latest="${{ steps.get_latest_tag.outputs.latest }}"
-          echo "Using range: ${latest}..HEAD"
-          range="${latest}..HEAD"
-          prs=$(git log --pretty=format:"%s" $range | grep -oE '\(#([0-9]+)\)' | grep -oE '[0-9]+' | sort -u | tr '\n' ',' | sed 's/,$//')
+          # Get the result from the previous step
+          latest_tag="${{ steps.get_latest_tag.outputs.latest }}"
+          
+          # Decide the starting commit based on whether a tag was found
+          if [[ -z "$latest_tag" ]]; then
+            echo "No previous tag provided. Using the repository's first commit."
+            from_commit=$(git rev-list --max-parents=0 HEAD)
+          else
+            echo "Using latest tag as the starting point: $latest_tag"
+            from_commit=$latest_tag
+          fi
+          
+          range="${from_commit}..HEAD"
+          echo "Using commit range: $range"
+          
+          # --- The rest of the script remains the same ---
+          commit_shas=$(git log --first-parent --pretty=%H $range)
+          
+          if [[ -z "$commit_shas" ]]; then
+            echo "No new commits found since last tag. No PRs to process."
+            echo "prs=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          pr_list=()
+          for sha in $commit_shas; do
+            pr_for_commit=$(gh pr list --search "$sha" --state merged --json number -q '.[0].number')
+            if [[ -n "$pr_for_commit" ]]; then
+              pr_list+=("$pr_for_commit")
+            fi
+          done
+          
+          prs=$(printf "%s\n" "${pr_list[@]}" | sort -u | tr '\n' ',' | sed 's/,$//')
+          
           echo "Found PR numbers: $prs"
           echo "prs=$prs" >> $GITHUB_OUTPUT
 
