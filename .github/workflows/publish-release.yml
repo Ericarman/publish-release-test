@@ -28,25 +28,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Debug - Step 1 git tag raw output
-        run: git tag
-
-      - name: Debug - Step 2 git tag | grep filtered output
-        run: git tag | grep -E '^\d+\.\d+\.\d+$'
-
-      - name: Debug - Step 3 git tag | grep | sort output
-        run: git tag | grep -E '^\d+\.\d+\.\d+$' | sort -V
-
-      - name: Debug - Step 4 git tag | grep | sort | tail output
-        run: |
-          output=$(git tag | grep -E '^\d+\.\d+\.\d+$' | sort -V | tail -n 1)
-          echo "Raw result of tail -n 1: '$output'" # Use quotes to see if there are hidden chars
-          echo "length of output: ${#output}" # Check length
-
       - name: Get latest version tag (Original step)
         id: get_latest_tag
         run: |
-          latest=$(git tag | grep -E '^\d+\.\d+\.\d+$' | sort -V | tail -n 1)
+          latest=$(git describe --tags --abbrev=0)
           echo "Latest version tag: '$latest'" # Add quotes around $latest here too for clarity
           echo "latest=$latest" >> $GITHUB_OUTPUT
 
