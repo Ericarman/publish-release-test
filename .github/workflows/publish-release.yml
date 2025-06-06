@@ -120,10 +120,10 @@ jobs:
           git config user.email "actions@github.com"
 
           if [ $(git tag -l "$version") ]; then
+            core.setFailed('❌ Tag $new_tag already exists. Skipping tagging.');
+          else
             git tag "$new_tag"
             git push origin "$new_tag"
-          else
-            core.setFailed('❌ Tag $new_tag already exists. Skipping tagging.');
           fi
 
       - name: Generate changelog
