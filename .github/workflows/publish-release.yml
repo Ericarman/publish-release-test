@@ -49,7 +49,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Get the result from the previous step
           latest_tag="${{ steps.get_latest_tag.outputs.latest }}"
           
           # Decide the starting commit based on whether a tag was found
@@ -64,7 +63,6 @@ jobs:
           range="${from_commit}..HEAD"
           echo "Using commit range: $range"
           
-          # --- The rest of the script remains the same ---
           commit_shas=$(git log --first-parent --pretty=%H $range)
           
           if [[ -z "$commit_shas" ]]; then
